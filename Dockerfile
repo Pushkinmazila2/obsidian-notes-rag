@@ -36,7 +36,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --chown=obsidian:obsidian src /app/src
 
 WORKDIR /app
-
+COPY pyproject.toml README.md* ./ 
+COPY src ./src
+RUN uv pip install --system --no-cache-dir .
 # Switch to non-root user
 USER obsidian
 
@@ -47,19 +49,19 @@ ENV OBSIDIAN_RAG_SOURCE=couchdb \
     OBSIDIAN_RAG_COUCH_URL=http://couchdb:5984 \
     OBSIDIAN_RAG_COUCH_DB=obsidian \
     MCP_SERVER_HOST=0.0.0.0 \
-    MCP_SERVER_PORT=3000 \
+    MCP_SERVER_PORT=6000 \
     LOG_LEVEL=info \
     PYTHONUNBUFFERED=1
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
+    CMD curl -f http://localhost:6000/health || exit 1
 
 # Default command: run HTTP/SSE MCP server
 CMD ["python", "-m", "obsidian_rag.http_server"]
 
 # Expose MCP HTTP/SSE port
-EXPOSE 3000
+EXPOSE 6000
 
 # Volumes
 VOLUME ["/data", "/config"]
