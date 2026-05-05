@@ -91,6 +91,21 @@ class Config:
     openai_model: str = "text-embedding-3-small"
     indexer: IndexerConfig = field(default_factory=IndexerConfig)
 
+    # -------------------------------------------------------------------------
+    # CouchDB / Self-hosted LiveSync settings
+    # -------------------------------------------------------------------------
+    # Source mode: "vault" (local filesystem) or "couchdb" (LiveSync)
+    source: str = "vault"
+
+    couchdb_url: str = "http://localhost:5984"
+    couchdb_db: str = "obsidian"
+    couchdb_username: Optional[str] = None
+    couchdb_password: Optional[str] = None
+
+    def is_couchdb_mode(self) -> bool:
+        """Return True when using CouchDB as the notes source."""
+        return self.source == "couchdb"
+
     def get_data_path(self) -> str:
         """Get the data path, using default if not set."""
         return self.data_path or str(get_data_dir())
@@ -152,6 +167,14 @@ def load_config() -> Config:
             if "indexer" in data:
                 config.indexer = IndexerConfig.from_dict(data["indexer"])
 
+            # CouchDB / LiveSync settings
+            config.source = data.get("source", config.source)
+            if "couchdb" in data:
+                config.couchdb_url = data["couchdb"].get("url", config.couchdb_url)
+                config.couchdb_db = data["couchdb"].get("db", config.couchdb_db)
+                config.couchdb_username = data["couchdb"].get("username", config.couchdb_username)
+                config.couchdb_password = data["couchdb"].get("password", config.couchdb_password)
+
         except Exception:
             pass  # Use defaults if config file is invalid
 
@@ -178,6 +201,18 @@ def load_config() -> Config:
             config.lmstudio_model = os.environ["OBSIDIAN_RAG_MODEL"]
         else:
             config.openai_model = os.environ["OBSIDIAN_RAG_MODEL"]
+
+    # CouchDB env overrides
+    if os.environ.get("OBSIDIAN_RAG_SOURCE"):
+        config.source = os.environ["OBSIDIAN_RAG_SOURCE"]
+    if os.environ.get("OBSIDIAN_RAG_COUCH_URL"):
+        config.couchdb_url = os.environ["OBSIDIAN_RAG_COUCH_URL"]
+    if os.environ.get("OBSIDIAN_RAG_COUCH_DB"):
+        config.couchdb_db = os.environ["OBSIDIAN_RAG_COUCH_DB"]
+    if os.environ.get("OBSIDIAN_RAG_COUCH_USER"):
+        config.couchdb_username = os.environ["OBSIDIAN_RAG_COUCH_USER"]
+    if os.environ.get("OBSIDIAN_RAG_COUCH_PASSWORD"):
+        config.couchdb_password = os.environ["OBSIDIAN_RAG_COUCH_PASSWORD"]
 
     return config
 
@@ -238,6 +273,22 @@ def save_config(config: Config) -> Path:
     indexer_dict = config.indexer.to_dict()
     if indexer_dict.get("preset", "default") != "default" or len(indexer_dict) > 1:
         data["indexer"] = indexer_dict
+
+    # CouchDB / LiveSync settings
+    if config.source != "vault":
+        data["source"] = config.source
+    if config.is_couchdb_mode() or config.couchdb_url != "http://localhost:5984":
+        couch_section: dict = {}
+        if config.couchdb_url != "http://localhost:5984":
+            couch_section["url"] = config.couchdb_url
+        if config.couchdb_db != "obsidian":
+            couch_section["db"] = config.couchdb_db
+        if config.couchdb_username:
+            couch_section["username"] = config.couchdb_username
+        if config.couchdb_password:
+            couch_section["password"] = config.couchdb_password
+        if couch_section:
+            data["couchdb"] = couch_section
 
     with open(config_path, "wb") as f:
         tomli_w.dump(data, f)

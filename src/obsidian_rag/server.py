@@ -10,6 +10,10 @@ from mcp.server.fastmcp import FastMCP
 from .config import load_config, Config
 from .indexer import create_embedder, Embedder, VaultIndexer
 from .store import VectorStore
+from .couch_source import (
+    CouchDBClient, CouchDBIndexer,
+    create_couch_client, create_couch_indexer,
+)
 
 # Create MCP server
 mcp = FastMCP("obsidian-rag")
@@ -18,6 +22,8 @@ mcp = FastMCP("obsidian-rag")
 _config: Optional[Config] = None
 _embedder: Optional[Embedder] = None
 _store: Optional[VectorStore] = None
+_couch_client: Optional[CouchDBClient] = None
+_couch_indexer: Optional[CouchDBIndexer] = None
 
 
 def get_config() -> Config:
@@ -67,6 +73,26 @@ def get_store() -> VectorStore:
         config = get_config()
         _store = VectorStore(data_path=config.get_data_path())
     return _store
+
+
+def get_couch_client() -> CouchDBClient:
+    """Get or create CouchDB client instance."""
+    global _couch_client
+    if _couch_client is None:
+        config = get_config()
+        _couch_client = create_couch_client(config)
+    return _couch_client
+
+
+def get_couch_indexer() -> CouchDBIndexer:
+    """Get or create CouchDB indexer instance."""
+    global _couch_indexer
+    if _couch_indexer is None:
+        config = get_config()
+        _couch_indexer = create_couch_indexer(
+            get_couch_client(), get_embedder(), get_store(), config
+        )
+    return _couch_indexer
 
 
 @mcp.tool()
@@ -284,6 +310,49 @@ def reindex(clear: bool = False, path_filter: Optional[str] = None) -> dict:
         "path_filter": path_filter,
         "cleared": clear
     }
+
+
+@mcp.tool()
+def couch_reindex(clear: bool = False, path_filter: Optional[str] = None) -> dict:
+    """Re-index the Obsidian vault from a CouchDB LiveSync database.
+
+    Args:
+        clear:       If True, wipe the existing index before re-indexing.
+        path_filter: Optional path prefix to limit indexing (e.g. "Работа/").
+
+    Returns:
+        Statistics about the indexing operation.
+    """
+    config = get_config()
+    if not config.is_couchdb_mode():
+        return {
+            "error": (
+                "CouchDB source is not configured. "
+                "Set source = \"couchdb\" and [couchdb] settings in config.toml, "
+                "or run 'obsidian-rag setup'."
+            )
+        }
+
+    indexer = get_couch_indexer()
+    return indexer.index_all(path_filter=path_filter, clear=clear)
+
+
+@mcp.tool()
+def couch_index_note(note_path: str) -> dict:
+    """Re-index a single note from CouchDB by its path.
+
+    Args:
+        note_path: Path to the note as stored in CouchDB (e.g. "Работа/note.md").
+
+    Returns:
+        Result dict with file_path and chunks count, or an error message.
+    """
+    config = get_config()
+    if not config.is_couchdb_mode():
+        return {"error": "CouchDB source is not configured."}
+
+    indexer = get_couch_indexer()
+    return indexer.index_by_id(note_path)
 
 
 def run_server():
