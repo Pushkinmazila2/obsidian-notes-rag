@@ -19,13 +19,21 @@ As an MCP server, it gives any compatible AI assistant the same capabilities —
 
 ## Requirements
 
+### Local Installation
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (for running and installing)
 - One of: `OPENAI_API_KEY`, [Ollama](https://ollama.ai/), or [LM Studio](https://lmstudio.ai/) for embeddings
 
+### Docker/Cloud Deployment
+- Docker and docker-compose
+- External CouchDB instance (for Self-hosted LiveSync)
+- Remote LLM API (OpenAI, or self-hosted Ollama/LM Studio with Bearer token auth)
+
 ## Setup
 
-### 1. Run the setup wizard
+### Local Setup (Traditional)
+
+#### 1. Run the setup wizard
 
 ```bash
 uvx obsidian-notes-rag setup
@@ -75,6 +83,41 @@ uv tool install obsidian-notes-rag
 ```
 
 This installs both `obsidian-rag` and `obsidian-notes-rag` to `~/.local/bin/`.
+
+### Docker Setup (Cloud/Remote)
+
+For cloud deployment with remote CouchDB and LLM services:
+
+```bash
+# Quick start
+bash scripts/quickstart.sh
+
+# Or manually
+docker-compose -f docker-compose.simple.yml up -d
+```
+
+See [Docker Setup Guide](docs/DOCKER_SETUP.md) and [HTTP/SSE MCP Setup](docs/HTTP_MCP_SETUP.md) for detailed instructions.
+
+**Key features:**
+- Lightweight container (no bundled LLM or database)
+- Connects to external CouchDB and LLM APIs
+- HTTP/SSE MCP protocol with Bearer token authentication
+- Deploy anywhere: AWS, GCP, Azure, Fly.io, Railway, etc.
+
+**Quick configuration:**
+
+```bash
+# .env file
+OBSIDIAN_RAG_SOURCE=couchdb
+OBSIDIAN_RAG_COUCH_URL=https://your-couchdb.example.com
+OBSIDIAN_RAG_COUCH_USER=admin
+OBSIDIAN_RAG_COUCH_PASSWORD=your-password
+
+OBSIDIAN_RAG_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+MCP_SERVER_TOKEN=your-secure-random-token
+```
 
 ### Using the CLI with AI coding assistants
 
@@ -151,9 +194,38 @@ Load an embedding model in LM Studio, then:
 obsidian-rag --provider lmstudio index
 ```
 
+## Data Sources
+
+### Local Vault (Default)
+Reads markdown files directly from your Obsidian vault folder.
+
+### CouchDB (Self-hosted LiveSync)
+Reads notes from a CouchDB database synced via the [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) plugin.
+
+**Benefits:**
+- Works with remote/cloud deployments
+- No need for local vault access
+- Real-time sync with Obsidian
+- Automatic change detection via CouchDB `_changes` feed
+
+**Setup:**
+```bash
+OBSIDIAN_RAG_SOURCE=couchdb
+OBSIDIAN_RAG_COUCH_URL=http://localhost:5984
+OBSIDIAN_RAG_COUCH_DB=obsidian
+OBSIDIAN_RAG_COUCH_USER=admin
+OBSIDIAN_RAG_COUCH_PASSWORD=password
+```
+
 ## Configuration
 
-The setup wizard writes to `~/.config/obsidian-notes-rag/config.toml`. You can also override with environment variables:
+### Local Configuration
+
+The setup wizard writes to `~/.config/obsidian-notes-rag/config.toml`.
+
+### Environment Variables
+
+You can override configuration with environment variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -164,6 +236,12 @@ The setup wizard writes to `~/.config/obsidian-notes-rag/config.toml`. You can a
 | `OBSIDIAN_RAG_OLLAMA_URL` | Ollama URL (default: `http://localhost:11434`) |
 | `OBSIDIAN_RAG_LMSTUDIO_URL` | LM Studio URL (default: `http://localhost:1234`) |
 | `OBSIDIAN_RAG_MODEL` | Override embedding model |
+| `OBSIDIAN_RAG_SOURCE` | Data source: `vault` or `couchdb` |
+| `OBSIDIAN_RAG_COUCH_URL` | CouchDB URL |
+| `OBSIDIAN_RAG_COUCH_DB` | CouchDB database name |
+| `OBSIDIAN_RAG_COUCH_USER` | CouchDB username |
+| `OBSIDIAN_RAG_COUCH_PASSWORD` | CouchDB password |
+| `MCP_SERVER_TOKEN` | Bearer token for HTTP/SSE MCP server |
 
 ## How it works
 

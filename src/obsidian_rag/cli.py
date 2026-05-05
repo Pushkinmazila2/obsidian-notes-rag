@@ -75,8 +75,18 @@ def setup():
 
     config = Config()
 
-    # 1. Select provider
-    click.echo("Select embedding provider:")
+    # 1. Select data source
+    click.echo("Select data source:")
+    click.echo("  1. Local vault (Obsidian folder on this computer)")
+    click.echo("  2. CouchDB (Self-hosted LiveSync)")
+    source_choice = click.prompt("Choice", type=click.Choice(["1", "2"]), default="1")
+    if source_choice == "1":
+        config.source = "vault"
+    else:
+        config.source = "couchdb"
+
+    # 2. Select provider
+    click.echo("\nSelect embedding provider:")
     click.echo("  1. OpenAI (recommended - requires API key)")
     click.echo("  2. Ollama (local, offline)")
     click.echo("  3. LM Studio (local, offline)")
@@ -88,7 +98,7 @@ def setup():
     else:
         config.provider = "lmstudio"
 
-    # 2. Provider-specific setup
+    # 3. Provider-specific setup
     if config.provider == "openai":
         # Check for existing API key
         existing_key = os.environ.get("OPENAI_API_KEY")
@@ -198,20 +208,62 @@ def setup():
             click.echo("Could not auto-detect models.")
             config.lmstudio_model = click.prompt("Enter embedding model identifier")
 
-    # 3. Vault path
-    while True:
-        vault_path = click.prompt("\nPath to your Obsidian vault")
-        vault_path = os.path.expanduser(vault_path)
-        if Path(vault_path).exists():
-            md_files = list(Path(vault_path).rglob("*.md"))
-            click.echo(f"✓ Vault found ({len(md_files)} markdown files)")
-            config.vault_path = vault_path
-            break
-        else:
-            click.echo(f"✗ Directory not found: {vault_path}")
-            if not click.confirm("Try again?", default=True):
+    # 4. Source-specific setup
+    if config.source == "couchdb":
+        # CouchDB setup
+        click.echo("\n=== CouchDB Configuration ===")
+        
+        couchdb_url = click.prompt(
+            "CouchDB URL",
+            default="http://localhost:5984"
+        )
+        config.couchdb_url = couchdb_url
+        
+        couchdb_db = click.prompt(
+            "Database name",
+            default="obsidian"
+        )
+        config.couchdb_db = couchdb_db
+        
+        if click.confirm("Does your CouchDB require authentication?", default=True):
+            couchdb_username = click.prompt("Username")
+            config.couchdb_username = couchdb_username
+            
+            couchdb_password = click.prompt("Password", hide_input=True)
+            config.couchdb_password = couchdb_password
+        
+        # Test connection
+        click.echo("\nTesting CouchDB connection...", nl=False)
+        try:
+            from .couch_source import create_couch_client
+            test_client = create_couch_client(config)
+            # Try to access the database
+            test_client.get_doc("_design/views")  # This will 404 but proves connection works
+            click.echo(" ✓ connected")
+            test_client.close()
+        except Exception as e:
+            click.echo(f" ✗ failed: {e}")
+            if not click.confirm("Continue anyway?", default=False):
                 click.echo("Setup cancelled.")
                 return
+        
+        # Skip vault path for CouchDB mode
+        config.vault_path = None
+    else:
+        # Vault path (local mode only)
+        while True:
+            vault_path = click.prompt("\nPath to your Obsidian vault")
+            vault_path = os.path.expanduser(vault_path)
+            if Path(vault_path).exists():
+                md_files = list(Path(vault_path).rglob("*.md"))
+                click.echo(f"✓ Vault found ({len(md_files)} markdown files)")
+                config.vault_path = vault_path
+                break
+            else:
+                click.echo(f"✗ Directory not found: {vault_path}")
+                if not click.confirm("Try again?", default=True):
+                    click.echo("Setup cancelled.")
+                    return
 
     # 4. Data directory
     default_data = str(get_data_dir())
@@ -228,7 +280,8 @@ def setup():
 
     # 6. Offer to run initial index
     if click.confirm("\nRun initial indexing now?", default=True):
-        click.echo("\nIndexing vault...")
+        source_name = "CouchDB" if config.is_couchdb_mode() else "vault"
+        click.echo(f"\nIndexing {source_name}...")
         try:
             # Create embedder based on provider
             if config.provider == "openai":
@@ -252,42 +305,66 @@ def setup():
                 )
 
             store = VectorStore(data_path=config.get_data_path())
-            indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
+            
+            if config.is_couchdb_mode():
+                # CouchDB indexing
+                from .couch_source import create_couch_client, create_couch_indexer
+                
+                client = create_couch_client(config)
+                indexer = create_couch_indexer(client, embedder, store, config)
+                
+                def progress_callback(file_path: str, done: int, total: int):
+                    click.echo(f"\r[{done}/{total}] {file_path}", nl=False)
+                
+                result = indexer.index_all(progress_cb=progress_callback)
+                click.echo()  # newline
+                click.echo(f"\n✓ Indexed {result['chunks_created']} chunks from {result['files_indexed']} files")
+                
+                client.close()
+            else:
+                # Local vault indexing
+                indexer = VaultIndexer(vault_path=config.vault_path, embedder=embedder, config=config.indexer)
 
-            files = list(indexer.iter_markdown_files())
-            chunk_count = 0
-            batch_chunks = []
-            batch_embeddings = []
-            batch_size = 50
+                files = list(indexer.iter_markdown_files())
+                chunk_count = 0
+                batch_chunks = []
+                batch_embeddings = []
+                batch_size = 50
 
-            with click.progressbar(files, label="Indexing") as bar:
-                for file_path in bar:
-                    try:
-                        for chunk, embedding in indexer.index_file(file_path):
-                            batch_chunks.append(chunk)
-                            batch_embeddings.append(embedding)
-                            chunk_count += 1
+                with click.progressbar(files, label="Indexing") as bar:
+                    for file_path in bar:
+                        try:
+                            for chunk, embedding in indexer.index_file(file_path):
+                                batch_chunks.append(chunk)
+                                batch_embeddings.append(embedding)
+                                chunk_count += 1
 
-                            if len(batch_chunks) >= batch_size:
-                                store.upsert_batch(batch_chunks, batch_embeddings)
-                                batch_chunks = []
-                                batch_embeddings = []
-                    except Exception as e:
-                        click.echo(f"\n  Error: {file_path}: {e}", err=True)
+                                if len(batch_chunks) >= batch_size:
+                                    store.upsert_batch(batch_chunks, batch_embeddings)
+                                    batch_chunks = []
+                                    batch_embeddings = []
+                        except Exception as e:
+                            click.echo(f"\n  Error: {file_path}: {e}", err=True)
 
-            if batch_chunks:
-                store.upsert_batch(batch_chunks, batch_embeddings)
+                if batch_chunks:
+                    store.upsert_batch(batch_chunks, batch_embeddings)
+
+                click.echo(f"\n✓ Indexed {chunk_count} chunks from {len(files)} files")
 
             embedder.close()
-            click.echo(f"\n✓ Indexed {chunk_count} chunks from {len(files)} files")
 
         except Exception as e:
             click.echo(f"\n✗ Indexing failed: {e}", err=True)
             click.echo("You can run indexing later with: obsidian-notes-rag index")
 
     # 7. Offer to install watcher service
-    click.echo("\nThe watcher service auto-indexes notes when they change.")
-    if sys.platform == "darwin":
+    if config.is_couchdb_mode():
+        click.echo("\nThe watcher service monitors CouchDB changes and auto-indexes.")
+    else:
+        click.echo("\nThe watcher service auto-indexes notes when they change.")
+    
+    # Only offer service installation for local vault mode on macOS
+    if sys.platform == "darwin" and not config.is_couchdb_mode():
         if click.confirm("Install watcher as a background service?", default=True):
             try:
                 plist_path = LAUNCH_AGENTS_DIR / PLIST_NAME
@@ -324,12 +401,20 @@ def setup():
                 click.echo(f"✗ Service installation failed: {e}", err=True)
                 click.echo("  You can install later with: obsidian-notes-rag install-service")
     else:
-        # Linux/Windows: no background service support yet
-        click.echo("  Background service not yet supported on this platform.")
-        click.echo("  To auto-index on file changes, run: obsidian-notes-rag watch")
+        # Linux/Windows or CouchDB mode: suggest manual watch command
+        if config.is_couchdb_mode():
+            click.echo("  For CouchDB mode, run the watcher manually:")
+            click.echo("    obsidian-notes-rag watch")
+        else:
+            click.echo("  Background service not yet supported on this platform.")
+            click.echo("  To auto-index on file changes, run: obsidian-notes-rag watch")
 
     click.echo("\nSetup complete! You can now:")
-    click.echo("  - Search: obsidian-notes-rag search \"your query\"")
+    if config.is_couchdb_mode():
+        click.echo("  - Search: obsidian-notes-rag search \"your query\"")
+        click.echo("  - Watch for changes: obsidian-notes-rag watch")
+    else:
+        click.echo("  - Search: obsidian-notes-rag search \"your query\"")
     click.echo("  - Add to Claude Code:")
     click.echo("      claude mcp add -s user obsidian-notes-rag -- uvx obsidian-notes-rag serve")
 
@@ -339,15 +424,14 @@ def setup():
 @click.option("--path-filter", default=None, help="Only index files under this path prefix (e.g. 'Daily Notes/')")
 @click.pass_context
 def index(ctx, clear, path_filter):
-    """Index all markdown files in the vault."""
-    vault_path = ctx.obj["vault"]
+    """Index all markdown files from the configured source (vault or CouchDB)."""
+    config = ctx.obj["config"]
     data_path = ctx.obj["data"]
     provider = ctx.obj["provider"]
     ollama_url = ctx.obj["ollama_url"]
     lmstudio_url = ctx.obj["lmstudio_url"]
     ollama_api_key = ctx.obj["ollama_api_key"]
     lmstudio_api_key = ctx.obj["lmstudio_api_key"]
-    config = ctx.obj["config"]
 
     # Get model from CLI override or config file based on provider
     model = ctx.obj["model"]
@@ -358,11 +442,6 @@ def index(ctx, clear, path_filter):
             model = config.ollama_model
         elif provider == "lmstudio":
             model = config.lmstudio_model
-
-    click.echo(f"Indexing vault: {vault_path}")
-    click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
-    click.echo(f"Model: {model}")
 
     # Determine the correct base_url and api_key based on provider
     if provider == "ollama":
@@ -378,51 +457,96 @@ def index(ctx, clear, path_filter):
     # Initialize components
     embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
     store = VectorStore(data_path=data_path)
-    indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
 
-    if clear:
-        click.echo("Clearing existing index...")
-        store.clear()
+    # Check if using CouchDB mode
+    if config.is_couchdb_mode():
+        from .couch_source import create_couch_client, create_couch_indexer
+        
+        click.echo(f"Source: CouchDB ({config.couchdb_url})")
+        click.echo(f"Database: {config.couchdb_db}")
+        click.echo(f"Data path: {data_path}")
+        click.echo(f"Provider: {provider}")
+        click.echo(f"Model: {model}")
+        
+        client = create_couch_client(config)
+        indexer = create_couch_indexer(client, embedder, store, config)
+        
+        def progress_callback(file_path: str, done: int, total: int):
+            click.echo(f"\r[{done}/{total}] {file_path}", nl=False)
+        
+        result = indexer.index_all(
+            path_filter=path_filter,
+            clear=clear,
+            progress_cb=progress_callback
+        )
+        
+        click.echo()  # newline after progress
+        click.echo(f"\nIndexed {result['files_indexed']} files")
+        click.echo(f"Created {result['chunks_created']} chunks")
+        click.echo(f"Total documents in store: {result['total_in_store']}")
+        
+        if result.get('errors'):
+            click.echo(f"\nErrors: {len(result['errors'])}", err=True)
+            for err in result['errors'][:5]:  # Show first 5 errors
+                click.echo(f"  {err['file']}: {err['error']}", err=True)
+    else:
+        # Local vault mode
+        vault_path = ctx.obj["vault"]
+        if not vault_path:
+            click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
+            return
+        
+        click.echo(f"Source: Local vault")
+        click.echo(f"Vault path: {vault_path}")
+        click.echo(f"Data path: {data_path}")
+        click.echo(f"Provider: {provider}")
+        click.echo(f"Model: {model}")
+        
+        indexer = VaultIndexer(vault_path=vault_path, embedder=embedder, config=config.indexer)
 
-    # Count files first
-    files = list(indexer.iter_markdown_files())
-    click.echo(f"Found {len(files)} markdown files")
+        if clear:
+            click.echo("Clearing existing index...")
+            store.clear()
 
-    if path_filter:
-        files = [f for f in files if str(f.relative_to(indexer.vault_path)).startswith(path_filter)]
-        click.echo(f"Filtered to {len(files)} files matching '{path_filter}'")
+        # Count files first
+        files = list(indexer.iter_markdown_files())
+        click.echo(f"Found {len(files)} markdown files")
 
-    # Index with progress
-    chunk_count = 0
-    batch_chunks = []
-    batch_embeddings = []
-    batch_size = 50
+        if path_filter:
+            files = [f for f in files if str(f.relative_to(indexer.vault_path)).startswith(path_filter)]
+            click.echo(f"Filtered to {len(files)} files matching '{path_filter}'")
 
-    with click.progressbar(files, label="Indexing") as bar:
-        for file_path in bar:
-            try:
-                for chunk, embedding in indexer.index_file(file_path):
-                    batch_chunks.append(chunk)
-                    batch_embeddings.append(embedding)
-                    chunk_count += 1
+        # Index with progress
+        chunk_count = 0
+        batch_chunks = []
+        batch_embeddings = []
+        batch_size = 50
 
-                    # Batch insert
-                    if len(batch_chunks) >= batch_size:
-                        store.upsert_batch(batch_chunks, batch_embeddings)
-                        batch_chunks = []
-                        batch_embeddings = []
+        with click.progressbar(files, label="Indexing") as bar:
+            for file_path in bar:
+                try:
+                    for chunk, embedding in indexer.index_file(file_path):
+                        batch_chunks.append(chunk)
+                        batch_embeddings.append(embedding)
+                        chunk_count += 1
 
-            except Exception as e:
-                click.echo(f"\nError indexing {file_path}: {e}", err=True)
+                        # Batch insert
+                        if len(batch_chunks) >= batch_size:
+                            store.upsert_batch(batch_chunks, batch_embeddings)
+                            batch_chunks = []
+                            batch_embeddings = []
 
-    # Insert remaining
-    if batch_chunks:
-        store.upsert_batch(batch_chunks, batch_embeddings)
+                except Exception as e:
+                    click.echo(f"\nError indexing {file_path}: {e}", err=True)
 
+        # Insert remaining
+        if batch_chunks:
+            store.upsert_batch(batch_chunks, batch_embeddings)
+
+        click.echo(f"\nIndexed {chunk_count} chunks from {len(files)} files")
+        click.echo(f"Total documents in store: {store.get_stats()['count']}")
+    
     embedder.close()
-
-    click.echo(f"\nIndexed {chunk_count} chunks from {len(files)} files")
-    click.echo(f"Total documents in store: {store.get_stats()['count']}")
 
 
 @main.command()
@@ -666,8 +790,8 @@ def stats(ctx):
 @click.option("--debounce", default=2.0, help="Seconds to wait before processing changes")
 @click.pass_context
 def watch(ctx, debounce):
-    """Watch vault for changes and auto-reindex."""
-    vault_path = ctx.obj["vault"]
+    """Watch for changes and auto-reindex (vault or CouchDB)."""
+    config = ctx.obj["config"]
     data_path = ctx.obj["data"]
     provider = ctx.obj["provider"]
     ollama_url = ctx.obj["ollama_url"]
@@ -676,24 +800,70 @@ def watch(ctx, debounce):
     lmstudio_api_key = ctx.obj["lmstudio_api_key"]
     model = ctx.obj["model"]
 
-    click.echo(f"Watching vault: {vault_path}")
-    click.echo(f"Data path: {data_path}")
-    click.echo(f"Provider: {provider}")
-    click.echo(f"Debounce: {debounce}s")
-    click.echo("Press Ctrl+C to stop.\n")
+    # Check if using CouchDB mode
+    if config.is_couchdb_mode():
+        from .couch_source import CouchDBWatcher, create_couch_client, create_couch_indexer
+        
+        click.echo(f"Source: CouchDB ({config.couchdb_url})")
+        click.echo(f"Database: {config.couchdb_db}")
+        click.echo(f"Data path: {data_path}")
+        click.echo(f"Provider: {provider}")
+        click.echo("Watching for changes via SSE feed...")
+        click.echo("Press Ctrl+C to stop.\n")
+        
+        # Determine the correct base_url and api_key based on provider
+        if provider == "ollama":
+            base_url = ollama_url
+            api_key = ollama_api_key
+        elif provider == "lmstudio":
+            base_url = lmstudio_url
+            api_key = lmstudio_api_key
+        else:
+            base_url = None
+            api_key = None
+        
+        embedder = create_embedder(provider=provider, model=model, base_url=base_url, api_key=api_key)
+        store = VectorStore(data_path=data_path)
+        client = create_couch_client(config)
+        indexer = create_couch_indexer(client, embedder, store, config)
+        
+        watcher = CouchDBWatcher(
+            client=client,
+            indexer=indexer,
+            since="now",
+        )
+        
+        try:
+            watcher.run_forever()
+        finally:
+            embedder.close()
+            client.close()
+    else:
+        # Local vault mode
+        vault_path = ctx.obj["vault"]
+        if not vault_path:
+            click.echo("Error: No vault path configured. Run 'obsidian-rag setup' first.", err=True)
+            return
+        
+        click.echo(f"Source: Local vault")
+        click.echo(f"Watching vault: {vault_path}")
+        click.echo(f"Data path: {data_path}")
+        click.echo(f"Provider: {provider}")
+        click.echo(f"Debounce: {debounce}s")
+        click.echo("Press Ctrl+C to stop.\n")
 
-    watcher = VaultWatcher(
-        vault_path=vault_path,
-        data_path=data_path,
-        provider=provider,
-        ollama_url=ollama_url,
-        lmstudio_url=lmstudio_url,
-        ollama_api_key=ollama_api_key,
-        lmstudio_api_key=lmstudio_api_key,
-        model=model,
-        debounce_delay=debounce,
-    )
-    watcher.run_forever()
+        watcher = VaultWatcher(
+            vault_path=vault_path,
+            data_path=data_path,
+            provider=provider,
+            ollama_url=ollama_url,
+            lmstudio_url=lmstudio_url,
+            ollama_api_key=ollama_api_key,
+            lmstudio_api_key=lmstudio_api_key,
+            model=model,
+            debounce_delay=debounce,
+        )
+        watcher.run_forever()
 
 
 @main.command()

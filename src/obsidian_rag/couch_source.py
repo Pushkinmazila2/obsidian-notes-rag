@@ -128,18 +128,30 @@ class CouchDBClient:
 
     # -- note reconstruction ---------------------------------------------------
 
-    def reconstruct_note(self, meta: dict) -> str:
+        def reconstruct_note(self, meta: dict) -> str:
         """Fetch all leaf chunks for a metadata doc and concatenate their data."""
         children: List[str] = meta.get("children", [])
         if not children:
+            logger.debug("No children found for note: %s", meta.get("_id"))
             return ""
 
+        logger.debug("Reconstructing note with %d chunks: %s", len(children), meta.get("_id"))
+        
         leaf_docs = self.get_docs_bulk(children)
-        by_id = {d["_id"]: d.get("data", "") for d in leaf_docs if "_id" in d}
+        by_id = {d["_id"]: d.get("data", "") for d in leaf_docs if "_id" in d and "data" in d}
+        
+        # Check for missing chunks
+        missing = [cid for cid in children if cid not in by_id]
+        if missing:
+            logger.warning("Missing %d chunks for note %s: %s", 
+                         len(missing), meta.get("_id"), missing[:5])
 
         # Preserve original order from children list
         parts = [by_id.get(cid, "") for cid in children]
-        return "".join(parts)
+        full_text = "".join(parts)
+        
+        logger.debug("Reconstructed note length: %d chars", len(full_text))
+        return full_text
 
     # -- changes feed ----------------------------------------------------------
 
@@ -205,17 +217,26 @@ class CouchDBIndexer:
         self.store = store
         self.config = config or IndexerConfig()
 
-    def _chunks_for_note(self, meta: dict) -> List[Chunk]:
+        def _chunks_for_note(self, meta: dict) -> List[Chunk]:
         """Reconstruct a note and split it into chunks."""
         # Use the ``path`` field (canonical case) as file_path; fall back to _id
         file_path: str = meta.get("path") or meta["_id"]
+        
+        logger.debug("Processing note: %s (type: %s)", file_path, meta.get("type"))
 
-        # Normalise: CouchDB _id uses lowercase path, path field has correct case
+        # Reconstruct full note content from chunks
         content = self.client.reconstruct_note(meta)
         if not content.strip():
+            logger.warning("Empty content for note: %s", file_path)
             return []
+        
+        logger.debug("Content length: %d chars", len(content))
 
-        return chunk_markdown(content, file_path, config=self.config)
+        # Split into chunks for indexing
+        chunks = chunk_markdown(content, file_path, config=self.config)
+        logger.debug("Created %d chunks for note: %s", len(chunks), file_path)
+        
+        return chunks
 
     def index_note(self, meta: dict) -> int:
         """Index a single note.  Returns number of chunks stored."""

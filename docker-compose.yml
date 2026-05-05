@@ -1,0 +1,185 @@
+version: '3.8'
+
+services:
+  # CouchDB database (Self-hosted LiveSync)
+  couchdb:
+    image: couchdb:3.3
+    container_name: obsidian-couchdb
+    restart: unless-stopped
+    ports:
+      - "5984:5984"
+    environment:
+      - COUCHDB_USER=${COUCHDB_USER:-admin}
+      - COUCHDB_PASSWORD=${COUCHDB_PASSWORD:-password}
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+      - couchdb-config:/opt/couchdb/etc/local.d
+    networks:
+      - obsidian-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/_up"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Ollama for local embeddings (optional, can use OpenAI instead)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: obsidian-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - obsidian-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # LocalAI - Alternative to Ollama (supports more models)
+  # Uncomment to use LocalAI instead of Ollama
+  # localai:
+  #   image: quay.io/go-skynet/local-ai:latest
+  #   container_name: obsidian-localai
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - localai-models:/models
+  #   environment:
+  #     - THREADS=4
+  #     - CONTEXT_SIZE=512
+  #   networks:
+  #     - obsidian-net
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8080/readiness"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #   # Uncomment for GPU support
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+  # Obsidian RAG MCP Server
+  obsidian-rag:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: obsidian-rag-mcp
+    restart: unless-stopped
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      # Data source
+      - OBSIDIAN_RAG_SOURCE=${OBSIDIAN_RAG_SOURCE:-couchdb}
+      
+      # CouchDB settings
+      - OBSIDIAN_RAG_COUCH_URL=http://couchdb:5984
+      - OBSIDIAN_RAG_COUCH_DB=${OBSIDIAN_RAG_COUCH_DB:-obsidian}
+      - OBSIDIAN_RAG_COUCH_USER=${COUCHDB_USER:-admin}
+      - OBSIDIAN_RAG_COUCH_PASSWORD=${COUCHDB_PASSWORD:-password}
+      
+      # Embedding provider (openai, ollama, lmstudio)
+      - OBSIDIAN_RAG_PROVIDER=${OBSIDIAN_RAG_PROVIDER:-ollama}
+      
+      # OpenAI settings (if using OpenAI)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OBSIDIAN_RAG_MODEL=${OBSIDIAN_RAG_MODEL:-text-embedding-3-small}
+      
+      # Ollama settings (if using Ollama)
+      - OBSIDIAN_RAG_OLLAMA_URL=http://ollama:11434
+      - OBSIDIAN_RAG_OLLAMA_MODEL=${OBSIDIAN_RAG_OLLAMA_MODEL:-nomic-embed-text}
+      
+      # Data storage
+      - OBSIDIAN_RAG_DATA=/data
+      
+      # Logging
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - rag-data:/data
+      - rag-config:/config
+    networks:
+      - obsidian-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "from src.obsidian_rag.store import VectorStore; VectorStore('/data').get_stats()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Watcher service for auto-indexing
+  obsidian-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: obsidian-rag-watcher
+    restart: unless-stopped
+    depends_on:
+      couchdb:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      obsidian-rag:
+        condition: service_healthy
+    command: ["python", "-m", "obsidian_rag.cli", "watch"]
+    environment:
+      # Data source
+      - OBSIDIAN_RAG_SOURCE=${OBSIDIAN_RAG_SOURCE:-couchdb}
+      
+      # CouchDB settings
+      - OBSIDIAN_RAG_COUCH_URL=http://couchdb:5984
+      - OBSIDIAN_RAG_COUCH_DB=${OBSIDIAN_RAG_COUCH_DB:-obsidian}
+      - OBSIDIAN_RAG_COUCH_USER=${COUCHDB_USER:-admin}
+      - OBSIDIAN_RAG_COUCH_PASSWORD=${COUCHDB_PASSWORD:-password}
+      
+      # Embedding provider
+      - OBSIDIAN_RAG_PROVIDER=${OBSIDIAN_RAG_PROVIDER:-ollama}
+      
+      # OpenAI settings
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OBSIDIAN_RAG_MODEL=${OBSIDIAN_RAG_MODEL:-text-embedding-3-small}
+      
+      # Ollama settings
+      - OBSIDIAN_RAG_OLLAMA_URL=http://ollama:11434
+      - OBSIDIAN_RAG_OLLAMA_MODEL=${OBSIDIAN_RAG_OLLAMA_MODEL:-nomic-embed-text}
+      
+      # Data storage
+      - OBSIDIAN_RAG_DATA=/data
+      
+      # Logging
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - rag-data:/data
+      - rag-config:/config
+    networks:
+      - obsidian-net
+
+networks:
+  obsidian-net:
+    driver: bridge
+
+volumes:
+  couchdb-data:
+  couchdb-config:
+  ollama-data:
+  rag-data:
+  rag-config:
