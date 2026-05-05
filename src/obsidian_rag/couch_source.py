@@ -129,11 +129,10 @@ class CouchDBClient:
     # -- note reconstruction ---------------------------------------------------
 
         def reconstruct_note(self, meta: dict) -> str:
-        """Fetch all leaf chunks for a metadata doc and concatenate their data."""
-        children: List[str] = meta.get("children", [])
-        if not children:
-            logger.debug("No children found for note: %s", meta.get("_id"))
-            return ""
+            children: List[str] = meta.get("children", [])
+            if not children:
+                logger.debug("No children found for note: %s", meta.get("_id"))
+                return ""
 
         logger.debug("Reconstructing note with %d chunks: %s", len(children), meta.get("_id"))
         
@@ -218,9 +217,7 @@ class CouchDBIndexer:
         self.config = config or IndexerConfig()
 
         def _chunks_for_note(self, meta: dict) -> List[Chunk]:
-        """Reconstruct a note and split it into chunks."""
-        # Use the ``path`` field (canonical case) as file_path; fall back to _id
-        file_path: str = meta.get("path") or meta["_id"]
+            file_path: str = meta.get("path") or meta["_id"]
         
         logger.debug("Processing note: %s (type: %s)", file_path, meta.get("type"))
 
