@@ -345,11 +345,11 @@ echo -e "${BLUE}═════════════════════�
 echo ""
 
 echo "Building Docker image..."
-docker-compose -f docker-compose.simple.yml build
+docker-compose -f docker-compose.yml build
 
 echo ""
 echo "Starting services..."
-docker-compose -f docker-compose.simple.yml up -d
+docker-compose -f docker-compose.yml up -d
 
 echo ""
 echo "Waiting for services to be ready..."
@@ -397,17 +397,17 @@ echo "3. Test the server:"
 echo "   curl -H \"Authorization: Bearer $MCP_TOKEN\" http://localhost:$MCP_PORT/tools"
 echo ""
 echo "4. Check logs:"
-echo "   docker-compose -f docker-compose.simple.yml logs -f"
+echo "   docker-compose -f docker-compose.yml logs -f"
 echo ""
 echo "5. Connect MCP clients:"
 echo "   - URL: http://localhost:$MCP_PORT"
 echo "   - Token: $MCP_TOKEN"
 echo ""
 echo "Useful commands:"
-echo "  docker-compose -f docker-compose.simple.yml ps       # Show status"
-echo "  docker-compose -f docker-compose.simple.yml logs -f  # View logs"
-echo "  docker-compose -f docker-compose.simple.yml down     # Stop services"
-echo "  docker-compose -f docker-compose.simple.yml restart  # Restart services"
+echo "  docker-compose -f docker-compose.yml ps       # Show status"
+echo "  docker-compose -f docker-compose.yml logs -f  # View logs"
+echo "  docker-compose -f docker-compose.yml down     # Stop services"
+echo "  docker-compose -f docker-compose.yml restart  # Restart services"
 echo ""
 echo "Configuration saved in: .env"
 echo "Documentation: docs/HTTP_MCP_SETUP.md"
